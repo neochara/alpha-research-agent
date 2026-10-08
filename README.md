@@ -1,392 +1,652 @@
 # Alpha Research Agent
 
-An LLM-driven quantitative research agent that turns a plain-English momentum question into a small, auditable sequence of backtests, critiques the results, and produces a research memo - while keeping the final test period sealed until a human explicitly opens it.
+A small quantitative research agent for testing cross-sectional momentum ideas on a sector ETF universe.
 
-> **Status:** educational/research prototype. It is designed to demonstrate agent architecture and quantitative research hygiene, not to provide investment advice or production trading signals.
+The project combines:
 
-## What it does end to end
+- LLM-based research reasoning
+- deterministic Python backtesting
+- experiment tracking
+- train / validation / held-out test separation
+- transaction-cost modeling
+- statistical diagnostics
+- a simple browser interface
+- a FastAPI JSON API
 
-```mermaid
-flowchart LR
-    A[Research question] --> B[Agent forms hypothesis]
-    B --> C[Agent chooses experiment parameters]
-    C --> D[Deterministic Python backtest]
-    D --> E[Metrics + costs + statistical checks]
-    E --> F{Evidence convincing?}
-    F -->|No| G[Reject or revise]
-    G --> C
-    F -->|Potentially| H[Rank surviving candidates]
-    H --> I[Research memo]
-    I --> J[Human-controlled held-out test]
-```
+The main idea is that the language model decides **what to test**, while deterministic Python code performs the actual calculations.
 
-A typical prompt is:
+---
 
-> Find a simple, robust cross-sectional momentum signal in the available sector ETF universe. Account for transaction costs and do not inspect the held-out test period.
+## What the agent does
 
-The language model is the **research manager**: it decides what experiment to run next based on previous results. It is **not** the numerical backtester. Fixed Python functions calculate signals, portfolio returns, costs, turnover, drawdowns, Sharpe ratios, and statistical diagnostics.
+Given a research question such as:
 
-## Data sources, tools, and outputs
+> Does 6-month momentum work?
 
-| Layer | Current implementation |
-| --- | --- |
-| Market data | Yahoo Finance via `yfinance` |
-| Universe | 9 long-history U.S. sector ETFs: `XLB XLE XLF XLI XLK XLP XLU XLV XLY` |
-| Frequency | Daily adjusted market prices |
-| Agent framework | OpenAI Agents SDK (`Agent`, `Runner`, function tools) |
-| Quant stack | `pandas`, `numpy`, `scipy` |
-| Agent tools | `describe_dataset`, `run_momentum_experiment`, `list_experiments` |
-| HTTP API | FastAPI service in `api.py` with interactive Swagger docs at `/docs` |
-| Experiment memory | Local JSONL experiment log |
-| Main output | Research memo saved to `results/latest_memo.md` and timestamped memo files |
-| Final test | Separate `finalize.py` command; never exposed as an agent tool |
-| Tests | Synthetic-data `pytest` suite + GitHub Actions workflow |
+the agent can:
 
-### Outputs created locally
+1. interpret the research question;
+2. generate a small number of testable momentum specifications;
+3. run deterministic backtests;
+4. compare training and validation performance;
+5. account for turnover and transaction costs;
+6. compute performance and statistical diagnostics;
+7. reject weak or unsupported specifications;
+8. return a concise research memo;
+9. save the experiment history and memo locally.
 
-After a run, the project can create:
+The held-out test period is deliberately excluded from the normal research loop.
+
+---
+
+## Research workflow
 
 ```text
-data/adjusted_close.csv
-results/experiments.jsonl
-results/latest_memo.md
-results/memos/memo_<timestamp>.md
+Research question
+        ↓
+Generate testable hypotheses
+        ↓
+Choose experiment parameters
+        ↓
+Run deterministic backtests
+        ↓
+Evaluate training + validation results
+        ↓
+Compare robustness, turnover, costs, statistics
+        ↓
+Select or reject candidate
+        ↓
+Generate research memo
 ```
 
-These research outputs and downloaded data are intentionally ignored by Git so that local experiment history is not accidentally committed.
+The LLM does not calculate returns, Sharpe ratios, turnover, or statistical tests itself.
 
-## The research idea: cross-sectional momentum
+Those calculations are performed by the Python backtesting code.
 
-For asset `i` at date `t`, the signal is
+---
+
+## Example research questions
+
+Examples include:
 
 ```text
-momentum(i,t) = P(i,t-skip) / P(i,t-lookback) - 1
+Does 6-month momentum work?
 ```
 
-For example, `lookback_days=252` and `skip_days=21` approximates a 12-month momentum signal that excludes the most recent month (often called a 12-1 style construction).
-
-At each rebalance date, the strategy:
-
-1. ranks the ETFs by the momentum signal;
-2. goes long the strongest group;
-3. goes short the weakest group;
-4. scales the long book to `+0.5` and the short book to `-0.5`;
-5. optionally uses inverse-volatility weighting; and
-6. subtracts turnover-based transaction costs.
-
-The portfolio is therefore designed to be approximately dollar-neutral with gross exposure 1.
-
-## Why this is an agent rather than an LLM wrapper
-
-A one-shot LLM wrapper would receive a question and return text or code. This project uses a feedback loop:
-
-```mermaid
-flowchart LR
-    A[Hypothesis] --> B[Tool call]
-    B --> C[Observed backtest result]
-    C --> D[Agent interpretation]
-    D --> E[Next experiment decision]
-    E --> B
+```text
+Does 12-month momentum outperform 6-month momentum?
 ```
 
-The next action depends on the result of the previous action. The project also has persistent experiment records, a hard experiment budget, and explicit stopping/rejection rules.
-
-## Research controls
-
-### 1. Sealed test set
-
-```mermaid
-flowchart LR
-    A[Train: through 2018] --> B[Validation: 2019-2022]
-    B --> C[Candidate selected]
-    C --> D[Held-out test: 2023 onward]
+```text
+Find a simple, robust cross-sectional momentum signal in the available sector ETF universe.
 ```
 
-The research agent can inspect **training and validation only**. `finalize.py` is intentionally not an agent tool. This reduces the risk of turning the test set into another tuning set.
+The current version intentionally limits the research space to momentum-style experiments supported by the available tools.
 
-### 2. Look-ahead protection
+---
 
-Weights formed using information at close `t` are shifted before calculating strategy returns, so they can only earn the return from `t` to `t+1`.
+## Data
 
-### 3. Transaction costs
+The project currently uses nine U.S. sector ETFs:
 
-Turnover is estimated from portfolio weight changes. Costs are charged in basis points and deducted from gross returns. The report shows both gross and net metrics plus annualized cost drag.
+```text
+XLB
+XLE
+XLF
+XLI
+XLK
+XLP
+XLU
+XLV
+XLY
+```
 
-### 4. Experiment budget
+Historical price data is downloaded using `yfinance`.
 
-The code enforces a maximum of eight momentum experiments per agent run. This is deliberately restrictive: an autonomous system that keeps searching until it finds a high Sharpe ratio is simply automating p-hacking.
+Using sector ETFs keeps the first version of the project relatively simple while providing a cross-sectional universe with long historical coverage.
 
-### 5. More robust inference
+---
 
-The backtester reports both:
+## Data split
 
-- the usual IID t-statistic for the daily mean return; and
-- a Bartlett-kernel HAC/Newey-West-style t-statistic that allows for short-range serial dependence and heteroskedasticity.
+The research protocol separates the data into:
 
-The HAC statistic is still **not** a cure for multiple testing, selection bias, nonstationarity, or a small investment universe. The agent is explicitly instructed to acknowledge those limitations.
+```text
+Training:
+through 2018-12-31
 
-## Repository structure
+Validation:
+2019-01-01 through 2022-12-31
+
+Held-out test:
+2023 onward
+```
+
+The agent can use the training and validation periods while developing and comparing hypotheses.
+
+The held-out test period is intentionally kept outside the automated research loop.
+
+This reduces the risk of repeatedly adapting the strategy to the final evaluation period.
+
+---
+
+## Momentum signals
+
+A simple cross-sectional momentum score can be written as
+
+```text
+momentum = past price / earlier price - 1
+```
+
+For example, a 6-month momentum signal uses approximately 126 trading days of price history.
+
+The ETFs are ranked according to their momentum scores.
+
+Recent relative winners can then be selected for the portfolio.
+
+Some specifications also use a skip period.
+
+For example:
+
+```text
+252-day lookback
+21-day skip
+```
+
+approximately corresponds to a 12-1 momentum signal: performance over roughly the previous twelve months while excluding the most recent month.
+
+---
+
+## Research safeguards
+
+The project includes several safeguards intended to make the experiments more disciplined.
+
+### Maximum experiment count
+
+The agent is limited to a small number of experiments per research run.
+
+This helps reduce automated specification searching and backtest overfitting.
+
+### Held-out test protection
+
+The main research agent does not access the held-out test set.
+
+Final test evaluation is performed separately through `finalize.py`.
+
+### Transaction costs
+
+Backtests include configurable transaction costs.
+
+Both gross and net performance can therefore be examined.
+
+### Turnover
+
+Portfolio turnover is tracked to show how aggressively a strategy trades.
+
+### Statistical diagnostics
+
+The project reports statistical diagnostics including:
+
+- naive return t-statistics;
+- HAC / Newey-West-style t-statistics.
+
+These statistics are diagnostics rather than proof that a trading strategy is profitable.
+
+---
+
+## Project structure
 
 ```text
 alpha-research-agent/
-├── agent.py                  # Agent instructions and tools
-├── backtest.py               # Signals, portfolios, costs, statistics
-├── config.py                 # Universe and research split
-├── data.py                   # Yahoo Finance download/cache/validation
-├── finalize.py               # Human-controlled held-out evaluation
-├── api.py                    # FastAPI HTTP interface (test set intentionally excluded)
-├── research_store.py         # Experiment log + saved memos
-├── run.py                    # CLI entry point
-├── requirements.txt
-├── pyproject.toml            # FastAPI entry point (`api:app`)
-├── requirements-dev.txt
-├── .env.example
-├── .gitignore
+├── agent.py
+├── api.py
+├── backtest.py
+├── config.py
+├── data.py
+├── finalize.py
+├── research_store.py
+├── run.py
+├── README.md
 ├── LICENSE
+├── .gitignore
+├── .env.example
+├── pyproject.toml
+├── requirements.txt
+├── requirements-dev.txt
 ├── tests/
+│   ├── conftest.py
 │   ├── test_backtest.py
 │   └── test_api.py
-├── docs/
-│   ├── GITHUB_SETUP.md
-│   ├── alpha_research_agent_guide.pdf
-│   └── images/
-└── .github/workflows/tests.yml
+├── .github/
+│   └── workflows/
+│       └── tests.yml
+└── docs/
+    ├── GITHUB_SETUP.md
+    ├── alpha_research_agent_guide.pdf
+    └── images/
+        ├── workflow.png
+        └── data_split.png
 ```
 
-## Setup
+---
 
-Requires Python 3.10+ (Python 3.11 is a good choice).
+## Main files
 
-### 1. Clone and enter the repository
+### `agent.py`
+
+Defines the research agent and the tools available to it.
+
+The agent decides which supported experiments to run and interprets the resulting statistics.
+
+### `backtest.py`
+
+Contains deterministic portfolio and backtesting logic.
+
+This is where returns, portfolio weights, transaction costs, turnover, and statistical metrics are calculated.
+
+### `data.py`
+
+Downloads and prepares the ETF price data.
+
+### `research_store.py`
+
+Stores experiment history so research runs can be inspected later.
+
+### `run.py`
+
+Command-line entry point for running the research agent.
+
+### `finalize.py`
+
+Runs the deliberately separate held-out test evaluation.
+
+### `api.py`
+
+Provides:
+
+- a browser-based research interface;
+- a FastAPI JSON API;
+- dataset and experiment inspection endpoints;
+- interactive Swagger API documentation.
+
+---
+
+## Installation
+
+Clone the repository:
 
 ```bash
-git clone https://github.com/<YOUR-USERNAME>/alpha-research-agent.git
+git clone https://github.com/neochara/alpha-research-agent.git
 cd alpha-research-agent
 ```
 
-If you are running the downloaded folder before publishing it, simply `cd` into that folder instead.
-
-### 2. Create a virtual environment
-
-macOS/Linux:
+Create a virtual environment:
 
 ```bash
 python3 -m venv .venv
+```
+
+Activate it on macOS or Linux:
+
+```bash
 source .venv/bin/activate
 ```
 
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-### 3. Install dependencies
+Install the dependencies:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 ```
 
-For development/testing:
+---
 
-```bash
-pip install -r requirements-dev.txt
-```
+## OpenAI API key
 
-### 4. Configure the API key
-
-Recommended:
+Copy the example environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and replace the placeholder with your OpenAI API key.
+Then edit `.env` and add your OpenAI API key:
 
-**Never commit `.env` or paste a real API key into source code.** The repository's `.gitignore` already excludes it.
+```text
+OPENAI_API_KEY=your_api_key_here
+```
 
-The model is intentionally not hard-coded. If `AGENT_MODEL` is unset, the OpenAI Agents SDK selects its default model. To choose one explicitly, set `AGENT_MODEL` in `.env` or pass `--model` on the command line.
+The `.env` file is excluded by `.gitignore` and should not be committed to GitHub.
 
-## Run the agent
+---
 
-### Default research question
+## Run from the command line
+
+Activate the virtual environment:
+
+```bash
+source .venv/bin/activate
+```
+
+Then run:
+
+```bash
+python run.py
+```
+
+To reset the previous research history before starting:
 
 ```bash
 python run.py --reset
 ```
 
-On first use, the project downloads and caches the ETF data. The agent then runs a controlled research loop and prints its final memo. The memo is also saved under `results/`.
+The agent will run its experiments and generate a research memo.
 
-### Custom research question
+Generated memos are stored under:
 
-```bash
-python run.py --reset --question \
-"Investigate whether 6-to-12 month cross-sectional momentum survives a one-month skip and monthly rebalancing."
+```text
+results/memos/
 ```
 
-### Force a fresh Yahoo Finance download
+The latest memo is also stored at:
 
-```bash
-python run.py --reset --refresh-data
+```text
+results/latest_memo.md
 ```
 
-### Choose a model explicitly
+---
+
+## Run the browser interface
+
+Start FastAPI with:
 
 ```bash
-python run.py --reset --model gpt-5.6-sol
+python -m fastapi dev
 ```
-
-Model availability can change; use a model available to your OpenAI API account.
-
-## Run it as a FastAPI service
-
-The same research engine can also be launched as an HTTP API. This is useful if you want to connect the agent to a web frontend, another application, a notebook, or a remote client.
-
-The API deliberately exposes **research and inspection endpoints only**. It does **not** expose the held-out test set. Final test evaluation remains a separate human-controlled CLI step through `finalize.py`.
-
-### Start the development server
-
-After installing `requirements.txt` and configuring `.env`, run:
-
-```bash
-fastapi dev
-```
-
-The repo includes a `pyproject.toml` entry point, so FastAPI knows that the application is `api:app`.
 
 Then open:
 
-- API root: `http://127.0.0.1:8000/`
-- Interactive Swagger documentation: `http://127.0.0.1:8000/docs`
-- Alternative ReDoc documentation: `http://127.0.0.1:8000/redoc`
-
-FastAPI automatically generates the interactive documentation from the endpoint and Pydantic schemas.
-
-### API endpoints
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/` | Basic service information and links |
-| `GET` | `/health` | Check that the API process is alive |
-| `GET` | `/dataset` | Inspect the available market dataset and research split |
-| `GET` | `/experiments` | Read the local experiment history |
-| `POST` | `/research` | Run an agent research session and return the final memo |
-
-There is intentionally **no `/finalize` endpoint**. This makes it harder for an automated client to repeatedly query the held-out test period during strategy selection.
-
-### Example request
-
-With the server running, you can call the research endpoint from another terminal:
-
-```bash
-curl -X POST "http://127.0.0.1:8000/research" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "Investigate whether medium-horizon cross-sectional momentum survives a one-month skip and monthly rebalancing.",
-    "reset": true,
-    "refresh_data": false
-  }'
+```text
+http://127.0.0.1:8000
 ```
 
-Or simply use the **Try it out** button at `http://127.0.0.1:8000/docs`.
+This is the human-facing interface.
 
-### Current API behavior
+Enter a research question in the text box and click:
 
-Research runs are serialized with a process-level lock so two simultaneous `/research` requests cannot interleave writes to the local experiment store. This is appropriate for the current single-user prototype. A production service would eventually replace the JSONL store and process-local lock with a database, job queue, authentication, rate limits, and asynchronous/background job handling.
-
-## Open the held-out test only after selecting a candidate
-
-Suppose the research memo selects experiment 3. Then run:
-
-```bash
-python finalize.py 3
+```text
+Run research
 ```
 
-This prints training, validation, and held-out test results for that already-selected specification.
+The result is displayed as a formatted research memo in the browser and is also saved locally.
 
-Do not use the test result to keep selecting new variants and still call it a held-out test.
+---
 
-## Run the test suite
+## API documentation
 
-The tests use synthetic prices, so they do not need an API key or live market data.
+FastAPI automatically generates interactive API documentation.
+
+Open:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+This opens the Swagger UI.
+
+Swagger allows you to inspect and test the API endpoints directly from the browser.
+
+The OpenAPI specification is available at:
+
+```text
+http://127.0.0.1:8000/openapi.json
+```
+
+---
+
+## API endpoints
+
+The current API exposes:
+
+```text
+GET  /
+```
+
+Human-facing browser interface.
+
+```text
+GET  /health
+```
+
+Basic server health check.
+
+```text
+GET  /dataset
+```
+
+Information about the dataset and research protocol.
+
+```text
+GET  /experiments
+```
+
+View stored experiment information.
+
+```text
+POST /research
+```
+
+Run the research agent through a JSON API request.
+
+```text
+POST /research-ui
+```
+
+Form endpoint used by the browser interface.
+
+The held-out test is intentionally not exposed through the API.
+
+---
+
+## Example JSON API request
+
+A request to:
+
+```text
+POST /research
+```
+
+can contain:
+
+```json
+{
+  "question": "Does 6-month momentum work?"
+}
+```
+
+The response contains:
+
+```json
+{
+  "memo": "...",
+  "memo_path": "..."
+}
+```
+
+This allows other programs, notebooks, front ends, or services to call the same research agent.
+
+---
+
+## Browser UI vs API
+
+There are two ways to interact with the project.
+
+### Browser UI
+
+Use:
+
+```text
+http://127.0.0.1:8000
+```
+
+This is intended for a human user.
+
+You type a normal research question into a text box and receive a formatted memo.
+
+### JSON API
+
+Use:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+or call the HTTP endpoints programmatically.
+
+This is useful when another application wants to communicate with the agent.
+
+---
+
+## Run tests
+
+Run:
 
 ```bash
 pytest -q
 ```
 
-They currently check important invariants such as:
+For more detailed output:
 
-- momentum signals only reference past prices;
-- invested portfolios are dollar-neutral with gross exposure 1;
-- transaction costs cannot improve net returns; and
-- a newly formed position cannot capture the same day's return.
+```bash
+pytest -v
+```
 
-GitHub Actions runs these tests automatically on pushes and pull requests. The repository also includes API tests for `/health` and a mocked `/research` request; those require the normal development dependencies to be installed.
+The tests are intended to check software and research correctness rather than whether a strategy is profitable.
 
-## What was improved in this version
+Examples include checks that:
 
-Compared with the initial prototype, this release adds:
+- momentum signals only use past information;
+- portfolio construction behaves as expected;
+- transaction costs are applied correctly;
+- same-day look-ahead bias is avoided;
+- API routes behave correctly.
 
-- a public, end-to-end README;
-- current OpenAI Agents SDK usage without a hard-coded default model;
-- a hard per-run experiment budget enforced in code, not only in the prompt;
-- cached-data validation;
-- gross **and** net performance reporting;
-- explicit annualized transaction-cost drag;
-- HAC/Newey-West-style t-statistics in addition to naive IID inference;
-- persistent Markdown research memos;
-- `.env.example` and safer secret handling;
-- `.gitignore` for local data, keys, and experiment artifacts;
-- synthetic-data unit tests;
-- GitHub Actions continuous integration;
-- a FastAPI HTTP layer with automatically generated interactive API documentation;
-- API-level tests for the health and research endpoints;
-- a `pyproject.toml` FastAPI entry point so the service can be launched with `fastapi dev`;
-- a public PDF guide and GitHub publishing instructions.
+---
 
-## What I would add next - and what I would not add yet
+## Continuous integration
 
-The best next additions are research-quality improvements, not more agent complexity.
+The repository includes a GitHub Actions workflow.
 
-**High priority:**
+On pushes and pull requests, GitHub creates a temporary environment, installs the project dependencies, and runs the test suite.
 
-1. walk-forward or rolling validation rather than one fixed validation window;
-2. richer robustness plots and year-by-year performance decomposition;
-3. persistent API jobs/status endpoints for longer research runs;
-4. factor/beta/sector neutralization tools;
-5. a point-in-time equity universe with delisted names and realistic liquidity filters;
-6. formal multiple-testing controls or a pre-registered experiment family;
-7. borrow fees, spread/market-impact assumptions, and execution timing refinements.
+This provides an automated check that changes do not break the existing implementation.
 
-**Later:**
+---
 
-- a second “quant critic” agent;
-- literature retrieval and paper comparison;
-- additional alpha families such as mean reversion, value, quality, or volatility;
-- a dashboard or web frontend that consumes the FastAPI service;
-- database-backed experiment tracking.
+## Final held-out evaluation
 
-I would **not** add those immediately. The current single-agent design is easier to audit and is a better learning project. A multi-agent system is useful only after the deterministic research layer is trustworthy.
+The held-out test period should only be examined after selecting a final specification.
+
+This is intentionally performed outside the main agent loop.
+
+A selected experiment can be evaluated using:
+
+```bash
+python finalize.py <experiment_id>
+```
+
+The purpose of this separation is to prevent the agent from repeatedly observing and adapting to the test period.
+
+---
+
+## Research outputs
+
+A typical research memo contains:
+
+- hypothesis;
+- dataset and protocol;
+- experiments tested;
+- training results;
+- validation results;
+- turnover;
+- transaction costs;
+- Sharpe ratio;
+- statistical diagnostics;
+- best candidate, if any;
+- caveats;
+- recommended next test.
+
+The agent is allowed to conclude that none of the tested specifications provide convincing evidence.
+
+A negative result is a valid research outcome.
+
+---
 
 ## Important limitations
 
-- Yahoo Finance is convenient for an educational prototype, not institutional-grade market data.
-- The ETF universe is tiny, which limits cross-sectional statistical power.
-- Historical performance does not establish future profitability.
-- The transaction-cost model is simplified.
-- The strategy does not currently model short-borrow constraints, market impact, taxes, or execution slippage beyond a simple cost assumption.
-- The fixed universe avoids some stock-level survivorship issues but is not a substitute for a true point-in-time security master.
-- Repeated human reruns with different prompts can still create selection bias even if each individual run has an experiment cap.
+This project is an educational and research prototype.
 
-## Framework
+Important limitations include:
 
-The project uses the **OpenAI Agents SDK** for agent orchestration. The SDK manages the loop in which the model chooses a tool, receives the result, and decides what to do next. The quantitative calculations themselves remain ordinary deterministic Python.
+- a small ETF universe;
+- limited strategy families;
+- historical backtesting only;
+- simplified trading-cost assumptions;
+- no live execution;
+- no broker integration;
+- no guarantee that historical patterns persist;
+- multiple-testing and backtest-overfitting risk;
+- statistical uncertainty from relatively short validation periods.
 
-## License
+The project should not be interpreted as investment advice or as evidence that any strategy will be profitable in live markets.
 
-MIT. See [`LICENSE`](LICENSE).
+---
 
-## Publishing to GitHub
+## Design philosophy
 
-See [`docs/GITHUB_SETUP.md`](docs/GITHUB_SETUP.md) for step-by-step commands to create a GitHub repository, initialize Git locally, push the project, protect your API key, and choose useful repository topics.
+The project intentionally separates the responsibilities of the language model and the quantitative engine.
+
+The language model handles tasks such as:
+
+```text
+What should I test?
+Which experiment should come next?
+What does the evidence suggest?
+What are the caveats?
+```
+
+Deterministic Python handles tasks such as:
+
+```text
+What were the returns?
+What was the turnover?
+What transaction costs were incurred?
+What was the Sharpe ratio?
+What was the t-statistic?
+```
+
+This separation makes the research process easier to inspect and reproduce than allowing the language model to directly invent quantitative results.
+
+---
+
+## Technology
+
+The project currently uses:
+
+- Python
+- OpenAI Agents SDK
+- FastAPI
+- Pydantic
+- pandas
+- NumPy
+- SciPy
+- yfinance
+- Markdown
+- pytest
+- GitHub Actions
+
+---
+
+## Disclaimer
+
+This repository is intended for research, educational, and demonstration purposes only.
+
+It is not investment advice and should not be used as the sole basis for financial decisions.

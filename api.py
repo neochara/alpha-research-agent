@@ -1,123 +1,355 @@
 from __future__ import annotations
 
-import threading
-from typing import Any
+from html import escape
 
+import markdown
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
-from agent import run_research
-from config import TRAIN_END, VALID_END
-from data import download_prices, load_prices
-from research_store import read_experiments, reset_store
+from agent import describe_dataset, list_experiments, run_research
 
+
+# Prefer the API key stored in this project's .env file
+# over any older key exported in the terminal session.
 load_dotenv(override=True)
+
 
 app = FastAPI(
     title="Alpha Research Agent API",
     version="1.0.0",
     description=(
-        "HTTP interface for the Alpha Research Agent. The API exposes research "
-        "and experiment-inspection endpoints, while the held-out test remains a "
-        "separate human-controlled CLI step."
+        "HTTP interface for the Alpha Research Agent. "
+        "The API exposes research and experiment-inspection endpoints, "
+        "while the held-out test remains a separate human-controlled CLI step."
     ),
 )
 
-# The current research store and session counter are process-local/stateful.
-# Serialize research requests so two agent runs cannot interleave experiments.
-_research_lock = threading.Lock()
 
+# ---------------------------------------------------------------------
+# Pydantic models used by the JSON API
+# ---------------------------------------------------------------------
 
 class ResearchRequest(BaseModel):
-    question: str = Field(min_length=8, description="Plain-English quantitative research question.")
-    reset: bool = Field(
-        default=False,
-        description="Clear prior local experiment history before this research run.",
-    )
-    refresh_data: bool = Field(
-        default=False,
-        description="Force a fresh Yahoo Finance download before the run.",
-    )
-    model: str | None = Field(
-        default=None,
-        description="Optional OpenAI model override. Otherwise use AGENT_MODEL or the SDK default.",
-    )
+    question: str
 
 
 class ResearchResponse(BaseModel):
-    question: str
     memo: str
     memo_path: str
-    experiments_run: int
 
 
-@app.get("/")
-def root() -> dict[str, str]:
-    return {
-        "service": "Alpha Research Agent API",
-        "docs": "/docs",
-        "health": "/health",
-    }
+# ---------------------------------------------------------------------
+# HTML helper
+# ---------------------------------------------------------------------
 
+def page_template(body: str, title: str = "Alpha Research Agent") -> str:
+    return f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>{escape(title)}</title>
+
+    <style>
+        * {{
+            box-sizing: border-box;
+        }}
+
+        body {{
+            margin: 0;
+            font-family:
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                Roboto,
+                Helvetica,
+                Arial,
+                sans-serif;
+
+            background: #f7f7f8;
+            color: #1f2937;
+        }}
+
+        .container {{
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 48px 24px 80px;
+        }}
+
+        h1 {{
+            margin-bottom: 8px;
+            font-size: 34px;
+        }}
+
+        h2 {{
+            margin-top: 32px;
+        }}
+
+        h3 {{
+            margin-top: 26px;
+        }}
+
+        p {{
+            line-height: 1.65;
+        }}
+
+        li {{
+            line-height: 1.65;
+            margin-bottom: 5px;
+        }}
+
+        .subtitle {{
+            color: #6b7280;
+            margin-bottom: 32px;
+            line-height: 1.5;
+        }}
+
+        .card {{
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 24px;
+            margin-top: 20px;
+        }}
+
+        textarea {{
+            width: 100%;
+            min-height: 150px;
+            resize: vertical;
+
+            padding: 14px;
+
+            font-family: inherit;
+            font-size: 16px;
+            line-height: 1.5;
+
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+        }}
+
+        textarea:focus {{
+            outline: none;
+            border-color: #111827;
+        }}
+
+        button {{
+            margin-top: 14px;
+            padding: 11px 18px;
+
+            border: none;
+            border-radius: 8px;
+
+            font-size: 15px;
+            font-weight: 600;
+
+            background: #111827;
+            color: white;
+
+            cursor: pointer;
+        }}
+
+        button:hover {{
+            opacity: 0.9;
+        }}
+
+        .memo {{
+            line-height: 1.65;
+
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+
+            padding: 24px;
+            margin-top: 20px;
+        }}
+
+        .memo h1,
+        .memo h2,
+        .memo h3 {{
+            margin-top: 24px;
+        }}
+
+        .memo h1:first-child,
+        .memo h2:first-child,
+        .memo h3:first-child {{
+            margin-top: 0;
+        }}
+
+        .path {{
+            margin-top: 16px;
+            color: #6b7280;
+            font-size: 13px;
+            word-break: break-all;
+        }}
+
+        .nav {{
+            margin-bottom: 24px;
+        }}
+
+        .nav a {{
+            color: #2563eb;
+            text-decoration: none;
+            margin-right: 18px;
+        }}
+
+        .nav a:hover {{
+            text-decoration: underline;
+        }}
+
+        code {{
+            background: #f3f4f6;
+            padding: 2px 5px;
+            border-radius: 4px;
+        }}
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        {body}
+    </div>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------
+# Human-facing browser UI
+# ---------------------------------------------------------------------
+
+@app.get("/", response_class=HTMLResponse)
+def root():
+    body = """
+        <h1>Alpha Research Agent</h1>
+
+        <p class="subtitle">
+            Enter a quantitative research question.
+            The agent will design a small number of controlled momentum
+            experiments, evaluate them on training and validation data,
+            and return a research memo.
+        </p>
+
+        <div class="nav">
+            <a href="/docs">API documentation</a>
+            <a href="/dataset">Dataset</a>
+            <a href="/experiments">Experiments</a>
+        </div>
+
+        <div class="card">
+            <form action="/research-ui" method="post">
+
+                <label for="question">
+                    <strong>Research question</strong>
+                </label>
+
+                <br><br>
+
+                <textarea
+                    id="question"
+                    name="question"
+                    required
+                    placeholder="For example: Find a simple, robust cross-sectional momentum signal in the available sector ETF universe."
+                ></textarea>
+
+                <br>
+
+                <button type="submit">
+                    Run research
+                </button>
+
+            </form>
+        </div>
+    """
+
+    return page_template(body)
+
+
+@app.post("/research-ui", response_class=HTMLResponse)
+def research_ui(question: str = Form(...)):
+    memo, memo_path = run_research(question)
+
+    safe_question = escape(question)
+    safe_path = escape(str(memo_path))
+
+    rendered_memo = markdown.markdown(
+        memo,
+        extensions=["extra"],
+    )
+
+    body = f"""
+        <div class="nav">
+            <a href="/">← New research question</a>
+            <a href="/docs">API documentation</a>
+        </div>
+
+        <h1>Research Result</h1>
+
+        <div class="card">
+            <strong>Question</strong>
+            <p>{safe_question}</p>
+        </div>
+
+        <h2>Research memo</h2>
+
+        <div class="memo">
+            {rendered_memo}
+        </div>
+
+        <div class="path">
+            Saved memo:
+            <code>{safe_path}</code>
+        </div>
+    """
+
+    return page_template(
+        body,
+        title="Research Result — Alpha Research Agent",
+    )
+
+
+# ---------------------------------------------------------------------
+# Programmatic JSON API
+# ---------------------------------------------------------------------
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health():
+    return {
+        "status": "ok",
+        "service": "alpha-research-agent",
+    }
 
 
 @app.get("/dataset")
-def dataset() -> dict[str, Any]:
-    prices = load_prices()
-    return {
-        "assets": list(prices.columns),
-        "start": str(prices.index.min().date()),
-        "end": str(prices.index.max().date()),
-        "rows": len(prices),
-        "missing_fraction_by_asset": {
-            c: round(float(prices[c].isna().mean()), 4) for c in prices.columns
-        },
-        "protocol": {
-            "train": f"through {TRAIN_END}",
-            "validation": f"after {TRAIN_END} through {VALID_END}",
-            "test": f"after {VALID_END}; sealed during research",
-        },
-    }
+def dataset():
+    """
+    Return information about the available dataset and research protocol.
+    """
+    return describe_dataset()
 
 
 @app.get("/experiments")
-def experiments() -> dict[str, Any]:
-    rows = read_experiments()
-    return {"count": len(rows), "experiments": rows}
+def experiments():
+    """
+    Return experiments stored by the research agent.
+    """
+    return list_experiments()
 
 
-@app.post(
-    "/research",
-    response_model=ResearchResponse,
-    status_code=status.HTTP_200_OK,
-)
-def research(request: ResearchRequest) -> ResearchResponse:
-    acquired = _research_lock.acquire(blocking=False)
-    if not acquired:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Another research run is already in progress. Try again after it finishes.",
-        )
+@app.post("/research", response_model=ResearchResponse)
+def research(request: ResearchRequest):
+    """
+    Run the Alpha Research Agent through the JSON API.
 
-    try:
-        if request.reset:
-            reset_store()
+    This endpoint is intended for programmatic access.
+    Human users can instead use the browser UI at `/`.
+    """
+    memo, memo_path = run_research(request.question)
 
-        before = len(read_experiments())
-        download_prices(force=request.refresh_data)
-        memo, memo_path = run_research(request.question, model=request.model)
-        after = len(read_experiments())
-
-        return ResearchResponse(
-            question=request.question,
-            memo=memo,
-            memo_path=memo_path,
-            experiments_run=max(0, after - before),
-        )
-    finally:
-        _research_lock.release()
+    return ResearchResponse(
+        memo=memo,
+        memo_path=str(memo_path),
+    )
