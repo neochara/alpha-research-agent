@@ -16,7 +16,7 @@ held-out test period.
 
 
 def main() -> None:
-    load_dotenv()
+    load_dotenv(override=True)
 
     parser = argparse.ArgumentParser(description="Run the Alpha Research Agent.")
     parser.add_argument("--question", default=DEFAULT_QUESTION)

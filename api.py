@@ -12,7 +12,7 @@ from config import TRAIN_END, VALID_END
 from data import download_prices, load_prices
 from research_store import read_experiments, reset_store
 
-load_dotenv()
+load_dotenv(override=True)
 
 app = FastAPI(
     title="Alpha Research Agent API",
