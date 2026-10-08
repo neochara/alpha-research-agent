@@ -1,0 +1,5 @@
+[tool.fastapi]
+entrypoint = "api:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

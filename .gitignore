@@ -1,0 +1,22 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local research outputs / downloaded data
+data/*.csv
+results/*.jsonl
+results/latest_memo.md
+results/memos/*.md
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
